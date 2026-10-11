@@ -126,6 +126,16 @@ label.f:first-of-type{margin-top:0}
 .kv{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line);font-size:14px}
 .kv:last-child{border-bottom:0}
 .kv span{color:var(--muted)}
+.urow{display:flex;align-items:center;gap:10px;width:100%;border:0;background:none;text-align:left;padding:11px 2px;border-bottom:1px solid var(--line)}
+.urow:last-child{border-bottom:0}
+.urow .av{width:36px;height:36px;border-radius:50%;background:var(--grey-bg);display:grid;place-items:center;font-weight:800;color:var(--navy);flex:none}
+.urow .nm{flex:1;font-weight:700}
+.urow .nm small{display:block;font-weight:500;color:var(--muted);font-size:12px}
+.tag{font-size:11px;font-weight:800;border-radius:10px;padding:2px 8px;background:var(--grey-bg);color:var(--muted)}
+.tag.admin{background:#e7e9f7;color:#3a3f8f}
+.tag.off{background:var(--red-bg);color:var(--red)}
+.urow.inactive .nm{color:var(--muted)}
+.backbtn{border:0;background:none;color:var(--blue-ink);font-weight:700;padding:4px 0 10px;font-size:14px}
 
 /* login */
 .login{min-height:100vh;display:flex;flex-direction:column;justify-content:center;padding:24px 18px;max-width:420px;margin:0 auto}
@@ -156,11 +166,11 @@ label.f:first-of-type{margin-top:0}
 
 <script>
 /* ============================================================
-   Kamla Dispatch & Credit Follow-up — app v1.0
+   Kamla Dispatch & Credit Follow-up — app v1.1
    Paste the Apps Script web app URL below (ends in /exec).
    ============================================================ */
 const API_URL = 'https://script.google.com/macros/s/AKfycbzh98AcwcVN5Lv7BsxeHbh5savmpM7uakwPEeRYb5Gq1z9YXPYBS-pd-vyMyHPVBO8Q/exec';
-const APP_VERSION = '1.0';
+const APP_VERSION = '1.1';
 
 const STEP_META = {
   bill:      { short: 'Bill',      group: 'credit', full: 'Bill shared (W/A group)' },
@@ -201,6 +211,8 @@ const S = {
   filter: store.get('fu_filter') || 'all',
   form: null,          // { mode:'add'|'edit', data, originalKey, error }
   search: { q: '', results: null },
+  users: null,         // Admin → Manage users
+  userForm: null,      // { isNew, name, role, active, error }
   busy: false
 };
 
@@ -255,7 +267,7 @@ function sheet({ title, text, ok, okClass = '', cancel = 'Cancel' }) {
 function loggedIn() { return S.session && S.session.token && Date.now() < S.session.expires; }
 function logout(msg) {
   S.session = null; S.boot = null; S.entries = []; store.del('fu_session');
-  S.view = 'pending'; S.form = null; S.search = { q: '', results: null };
+  S.view = 'pending'; S.form = null; S.search = { q: '', results: null }; S.users = null; S.userForm = null;
   renderLogin(msg);
 }
 
@@ -344,6 +356,7 @@ function renderShell() {
 
 function go(view) {
   S.view = view; clearToast();
+  if (view === 'users') { S.userForm = null; S.users = null; }
   if (view === 'add') S.form = { mode: 'add', data: blankEntry(), originalKey: null, error: '' };
   render();
   window.scrollTo(0, 0);
@@ -351,10 +364,10 @@ function go(view) {
 
 function render() {
   if (!S.boot) return;
-  document.querySelectorAll('.nav button').forEach(b => b.classList.toggle('on', b.dataset.v === (S.view === 'edit' ? 'pending' : S.view)));
+  document.querySelectorAll('.nav button').forEach(b => b.classList.toggle('on', b.dataset.v === ({ edit: 'pending', users: 'me' }[S.view] || S.view)));
   const od = S.entries.filter(e => e.status === 'Overdue').length;
   const nb = $('#nbadge'); if (nb) { nb.hidden = !od; nb.textContent = od; }
-  ({ pending: renderPending, add: renderForm, edit: renderForm, search: renderSearch, me: renderMe })[S.view]();
+  ({ pending: renderPending, add: renderForm, edit: renderForm, search: renderSearch, me: renderMe, users: renderUsers })[S.view]();
 }
 
 async function loadEntries(rerender) {
@@ -655,7 +668,9 @@ function renderMe() {
       <button class="btn" type="submit">Save TAT</button>
     </form>` : `
     <div class="panel"><h2>TAT — days allowed</h2>${STEP_ORDER.map(k => `<div class="kv"><span>${STEP_META[k].full}</span><b>${tatText(b.tat[k])}</b></div>`).join('')}</div>`}
+    ${admin ? `<div class="panel"><h2>Users</h2><div class="hint" style="margin:-6px 0 4px">Add staff, reset a forgotten PIN, change role or deactivate someone who has left.</div><button class="btn ghost" id="mu" style="margin-top:8px">Manage users</button></div>` : ''}
     <button class="btn danger" id="lo">Log out</button>`;
+  if (admin) $('#mu').addEventListener('click', () => go('users'));
   $('#lo').addEventListener('click', async () => { if (await sheet({ title: 'Log out?', ok: 'Log out', okClass: 'danger' })) logout(); });
   if (admin) $('#tatf').addEventListener('submit', e => {
     e.preventDefault();
@@ -672,6 +687,87 @@ function renderMe() {
       await loadEntries(false);
       renderMe();
     });
+  });
+}
+
+/* ============================================================
+   USERS (Admin)
+   ============================================================ */
+function renderUsers() {
+  if (S.session.role !== 'Admin') return go('me');
+  if (S.userForm) return renderUserForm();
+  if (!S.users) {
+    $('#main').innerHTML = '<div class="empty"><div class="spin" style="margin:0 auto 10px"></div>Loading users…</div>';
+    withBusy(async () => {
+      const r = await api('listUsers');
+      if (!r.ok) throw new Error(r.error);
+      S.users = r.users; if (S.view === 'users') renderUsers();
+    });
+    return;
+  }
+  const list = S.users.slice().sort((a, b) => (b.active - a.active) || a.name.localeCompare(b.name));
+  $('#main').innerHTML = `
+    <button class="backbtn" id="ub">‹ Settings</button>
+    <div class="panel">
+      <h2>Users (${S.users.filter(u => u.active).length} active)</h2>
+      ${list.map(u => `<button class="urow ${u.active ? '' : 'inactive'}" data-n="${esc(u.name)}">
+        <span class="av">${esc(u.name.charAt(0).toUpperCase())}</span>
+        <span class="nm">${esc(u.name)}${u.name === S.session.user ? ' <small>you</small>' : ''}${u.pinOk ? '' : '<small style="color:var(--red)">PIN not valid — set a new one</small>'}</span>
+        ${u.role === 'Admin' ? '<span class="tag admin">Admin</span>' : '<span class="tag">Staff</span>'}
+        ${u.active ? '' : '<span class="tag off">Inactive</span>'}
+      </button>`).join('')}
+      <button class="btn" id="uadd">＋ Add user</button>
+    </div>`;
+  $('#ub').addEventListener('click', () => go('me'));
+  $('#uadd').addEventListener('click', () => { S.userForm = { isNew: true, name: '', role: 'Staff', active: true, error: '' }; renderUsers(); window.scrollTo(0, 0); });
+  document.querySelectorAll('.urow').forEach(b => b.addEventListener('click', () => {
+    const u = S.users.find(x => x.name === b.dataset.n);
+    S.userForm = { isNew: false, name: u.name, role: u.role, active: u.active, error: '' };
+    renderUsers(); window.scrollTo(0, 0);
+  }));
+}
+
+function renderUserForm() {
+  const f = S.userForm, self = !f.isNew && f.name === S.session.user;
+  $('#main').innerHTML = `
+    <button class="backbtn" id="ub">‹ Users</button>
+    <form class="panel" id="uf" autocomplete="off">
+      <h2>${f.isNew ? 'Add user' : 'Edit ' + esc(f.name)}</h2>
+      <label class="f" for="un">Name</label>
+      <input class="in" id="un" value="${esc(f.name)}" ${f.isNew ? '' : 'disabled'} autocapitalize="words" maxlength="40" placeholder="e.g. Muskan">
+      ${f.isNew ? '<div class="hint">This is the name staff pick when logging in, and it appears in the KPI. It cannot be changed later.</div>' : ''}
+      <label class="f" for="up">${f.isNew ? '4-digit PIN' : 'New PIN'}</label>
+      <input class="in pin" id="up" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off" placeholder="${f.isNew ? '••••' : 'leave blank to keep'}" style="${f.isNew ? '' : 'letter-spacing:normal;font-size:16px;font-weight:600'}">
+      <div class="hint">${f.isNew ? 'Tell this PIN to the person privately.' : 'Type a new PIN only to reset it. Resetting also unblocks someone locked out by wrong PINs.'}${self ? ' Changing your own PIN keeps you logged in.' : ''}</div>
+      <label class="f">Role</label>
+      <div class="seg" id="urole">${['Staff', 'Admin'].map(r => `<button type="button" class="${f.role === r ? 'on' : ''}" data-r="${r}" ${self ? 'disabled' : ''}>${r}</button>`).join('')}</div>
+      <div class="hint">Admin can manage users, change TAT, change entry dates and undo anyone's step.</div>
+      <label class="f">Status</label>
+      <div class="seg" id="uact">${[['1', 'Active'], ['0', 'Inactive']].map(([v, l]) => `<button type="button" class="${(f.active ? '1' : '0') === v ? 'on' : ''}" data-a="${v}" ${self ? 'disabled' : ''}>${l}</button>`).join('')}</div>
+      <div class="hint">${self ? 'You cannot deactivate or demote yourself.' : 'Inactive users cannot log in, but their past work stays in the KPI.'}</div>
+      ${f.error ? `<div class="err">${esc(f.error)}</div>` : ''}
+      <button class="btn" type="submit">${f.isNew ? 'Add user' : 'Save'}</button>
+    </form>`;
+  $('#ub').addEventListener('click', () => { S.userForm = null; renderUsers(); });
+  $('#up').addEventListener('input', e => { e.target.value = e.target.value.replace(/\D/g, '').slice(0, 4); });
+  document.querySelectorAll('#urole button').forEach(b => b.addEventListener('click', () => { f.role = b.dataset.r; document.querySelectorAll('#urole button').forEach(x => x.classList.toggle('on', x === b)); }));
+  document.querySelectorAll('#uact button').forEach(b => b.addEventListener('click', () => { f.active = b.dataset.a === '1'; document.querySelectorAll('#uact button').forEach(x => x.classList.toggle('on', x === b)); }));
+  $('#uf').addEventListener('submit', async e => {
+    e.preventDefault();
+    if (f.isNew) f.name = $('#un').value.trim().replace(/\s+/g, ' ');
+    const pin = $('#up').value.trim();
+    f.error = '';
+    if (!f.name) f.error = 'Enter a name.';
+    else if (f.isNew && !/^\d{4}$/.test(pin)) f.error = 'Set a 4-digit PIN.';
+    else if (!f.isNew && pin && !/^\d{4}$/.test(pin)) f.error = 'PIN must be exactly 4 digits.';
+    if (f.error) return renderUserForm();
+    const r = await withBusy(() => api('saveUser', { userData: { isNew: f.isNew, name: f.name, pin, role: f.role, active: f.active } }));
+    if (!r) return;
+    if (!r.ok) { f.error = r.error; return renderUserForm(); }
+    if (r.session) { S.session = r.session; store.set('fu_session', S.session); }
+    S.users = r.users;
+    toast(f.isNew ? `${r.saved} added ✓` : (pin ? `PIN reset for ${r.saved} ✓` : `${r.saved} saved ✓`));
+    S.userForm = null; renderUsers(); window.scrollTo(0, 0);
   });
 }
 
